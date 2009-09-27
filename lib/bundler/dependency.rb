@@ -11,7 +11,7 @@ module Bundler
 
       @name       = name
       @version    = options["version"] || ">= 0"
-      @require_as = Array(options["require_as"] || name)
+      @require_as = Array(options.include?("require_as") ? options["require_as"] : name).compact
       @only       = options["only"]
       @except     = options["except"]
       @block      = block

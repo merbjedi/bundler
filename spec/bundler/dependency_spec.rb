@@ -33,6 +33,19 @@ describe "Bundler::Dependency" do
     b.require_as.should == ["omg"]
   end
 
+  it "should allow :require_as to be nil, in which case require_as is empty" do
+    b = Bundler::Dependency.new("actionpack", :require_as => nil)
+    b.require_as.should == []
+  end
+
+  it "should allow :require_as to be an empty array, in which case require_as is empty" do
+    b = Bundler::Dependency.new("actionpack", :require_as => [])
+    b.require_as.should == []
+
+    b = Bundler::Dependency.new("actionpack", :require_as => [nil])
+    b.require_as.should == []
+  end
+
   it "can take an array as the :require_as option" do
     b = Bundler::Dependency.new("actionpack", :require_as => ["action_controller", "action_view"])
     b.require_as.should == ["action_controller", "action_view"]
