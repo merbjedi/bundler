@@ -1,8 +1,23 @@
 module Bundler
+  class DirectorySourceError < StandardError; end
+  class GitSourceError < StandardError ; end
   # Represents a source of rubygems. Initially, this is only gem repositories, but
   # eventually, this will be git, svn, HTTP
   class Source
     attr_accessor :repository, :local
+
+    def initialize(options) ; end
+
+  private
+
+    def process_source_gems(gems)
+      new_gems = Hash.new { |h,k| h[k] = [] }
+      gems.values.each do |spec|
+        spec.source = self
+        new_gems[spec.name] << spec
+      end
+      new_gems
+    end
   end
 
   class GemSource < Source
@@ -38,7 +53,7 @@ module Bundler
       destination = repository.path
 
       unless destination.writable?
-        raise RubygemsRetardation
+        raise RubygemsRetardation, "destination: #{destination} is not writable"
       end
 
       # Download the gem
@@ -65,10 +80,11 @@ module Bundler
         index = Marshal.load(main_index)
       end
 
-      gems = {}
+      gems = Hash.new { |h,k| h[k] = [] }
       index.each do |name, version, platform|
         spec = RemoteSpecification.new(name, version, platform, @uri)
-        gems[spec.full_name] = spec
+        spec.source = self
+        gems[spec.name] << spec if Gem::Platform.match(spec.platform)
       end
       gems
     rescue Gem::RemoteFetcher::FetchError => e
@@ -77,8 +93,13 @@ module Bundler
   end
 
   class SystemGemSource < Source
+
+    def self.instance
+      @instance ||= new({})
+    end
+
     def initialize(options)
-      # Nothing to do
+      @source = Gem::SourceIndex.from_installed_gems
     end
 
     def can_be_local?
@@ -86,7 +107,7 @@ module Bundler
     end
 
     def gems
-      @specs ||= Gem::SourceIndex.from_installed_gems.gems
+      @gems ||= process_source_gems(@source.gems)
     end
 
     def ==(other)
@@ -98,19 +119,12 @@ module Bundler
     end
 
     def download(spec)
-      # gemfile = Pathname.new(local.loaded_from)
-      # gemfile = gemfile.dirname.join('..', 'cache', "#{local.full_name}.gem").expand_path
-      # repository.cache(File.join(Gem.dir, "cache", "#{local.full_name}.gem"))
       gemfile = Pathname.new(spec.loaded_from)
       gemfile = gemfile.dirname.join('..', 'cache', "#{spec.full_name}.gem")
       repository.cache(gemfile)
     end
 
   private
-
-    def fetch_specs
-
-    end
 
   end
 
@@ -144,11 +158,12 @@ module Bundler
   private
 
     def fetch_specs
-      specs = {}
+      specs = Hash.new { |h,k| h[k] = [] }
 
       Dir["#{@location}/*.gem"].each do |gemfile|
         spec = Gem::Format.from_file_by_path(gemfile).spec
-        specs[spec.full_name] = spec
+        spec.source = self
+        specs[spec.name] << spec
       end
 
       specs
@@ -156,13 +171,23 @@ module Bundler
   end
 
   class DirectorySource < Source
-    attr_reader :location
+    attr_reader :location, :specs, :required_specs
 
     def initialize(options)
-      @name          = options[:name]
-      @version       = options[:version]
-      @location      = options[:location]
-      @require_paths = options[:require_paths] || %w(lib)
+      if options[:location]
+        @location = Pathname.new(options[:location]).expand_path
+      end
+      @glob           = options[:glob] || "**/*.gemspec"
+      @specs          = {}
+      @required_specs = []
+    end
+
+    def add_spec(path, name, version, require_paths = %w(lib))
+      raise DirectorySourceError, "already have a gem defined for '#{path}'" if @specs[path.to_s]
+      @specs[path.to_s] = Gem::Specification.new do |s|
+        s.name     = name
+        s.version  = Gem::Version.new(version)
+      end
     end
 
     def can_be_local?
@@ -171,67 +196,70 @@ module Bundler
 
     def gems
       @gems ||= begin
-        specs = {}
+        # Locate all gemspecs from the directory
+        specs = locate_gemspecs
+        specs = merge_defined_specs(specs)
 
-        # Find any gemspec files in the directory and load those specs
-        Dir["#{location}/**/*.gemspec"].each do |file|
-          file = Pathname.new(file)
-          if spec = eval(File.read(file)) and validate_gemspec(file, spec)
-            spec.location = file.dirname.expand_path
-            specs[spec.full_name] = spec
+        required_specs.each do |required|
+          unless specs.any? {|k,v| v.name == required }
+            raise DirectorySourceError, "No gemspec for '#{required}' was found in" \
+              " '#{location}'. Please explicitly specify a version."
           end
         end
 
-        # If a gemspec for the dependency was not found, add it to the list
-        if specs.keys.grep(/^#{Regexp.escape(@name)}/).empty?
-          case
-          when @version.nil?
-            raise ArgumentError, "If you use :at, you must specify the gem " \
-              "and version you wish to stand in for"
-          when !Gem::Version.correct?(@version)
-            raise ArgumentError, "If you use :at, you must specify a gem and " \
-              "version. You specified #{@version} for the version"
-          end
+        process_source_gems(specs)
+      end
+    end
 
-          default = Gem::Specification.new do |s|
-            s.name     = @name
-            s.version  = Gem::Version.new(@version) if @version
-            s.location = location
-          end
-          specs[default.full_name] = default
+    def locate_gemspecs
+      Dir["#{location}/#{@glob}"].inject({}) do |specs, file|
+        file = Pathname.new(file)
+        if spec = eval(File.read(file)) and validate_gemspec(file.dirname, spec)
+          spec.location = file.dirname.expand_path
+          specs[spec.full_name] = spec
         end
-
         specs
       end
     end
 
-    # Too aggressive apparently.
-    # ===
-    # def validate_gemspec(file, spec)
-    #   file = Pathname.new(file)
-    #   Dir.chdir(file.dirname) do
-    #     spec.validate
-    #   end
-    # rescue Gem::InvalidSpecificationException => e
-    #   file = file.relative_path_from(repository.path)
-    #   Bundler.logger.warn e.message
-    #   Bundler.logger.warn "Gemspec #{spec.name} (#{spec.version}) found at '#{file}' is not valid"
-    #   false
-    # end
-    def validate_gemspec(file, spec)
-      base = file.dirname
+    def merge_defined_specs(specs)
+      @specs.each do |path, spec|
+        # Set the spec location
+        spec.location = "#{location}/#{path}"
+
+        if existing = specs.values.find { |s| s.name == spec.name }
+          if existing.version != spec.version
+            raise DirectorySourceError, "The version you specified for #{spec.name}" \
+              " is #{spec.version}. The gemspec is #{existing.version}."
+          # Not sure if this is needed
+          # ====
+          # elsif File.expand_path(existing.location) != File.expand_path(spec.location)
+          #   raise DirectorySourceError, "The location you specified for #{spec.name}" \
+          #     " is '#{spec.location}'. The gemspec was found at '#{existing.location}'."
+          end
+        elsif !validate_gemspec(spec.location, spec)
+          raise "Your gem definition is not valid: #{spec}"
+        else
+          specs[spec.full_name] = spec
+        end
+      end
+      specs
+    end
+
+    def validate_gemspec(path, spec)
+      path = Pathname.new(path)
       msg  = "Gemspec for #{spec.name} (#{spec.version}) is invalid:"
       # Check the require_paths
-      (spec.require_paths || []).each do |path|
-        unless base.join(path).directory?
-          Bundler.logger.warn "#{msg} Missing require path: '#{path}'"
+      (spec.require_paths || []).each do |require_path|
+        unless path.join(require_path).directory?
+          Bundler.logger.warn "#{msg} Missing require path: '#{require_path}'"
           return false
         end
       end
 
       # Check the executables
       (spec.executables || []).each do |exec|
-        unless base.join(spec.bindir, exec).file?
+        unless path.join(spec.bindir, exec).file?
           Bundler.logger.warn "#{msg} Missing executable: '#{File.join(spec.bindir, exec)}'"
           return false
         end
@@ -255,6 +283,8 @@ module Bundler
   end
 
   class GitSource < DirectorySource
+    attr_reader :ref, :uri, :branch
+
     def initialize(options)
       super
       @uri = options[:uri]
@@ -281,9 +311,9 @@ module Bundler
         `git clone #{@uri} #{location} --no-hardlinks`
 
         if @ref
-          Dir.chdir(location) { `git checkout #{@ref}` }
+          Dir.chdir(location) { `git checkout --quiet #{@ref}` }
         elsif @branch && @branch != "master"
-          Dir.chdir(location) { `git checkout origin/#{@branch}` }
+          Dir.chdir(location) { `git checkout --quiet origin/#{@branch}` }
         end
       end
       super

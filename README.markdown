@@ -175,11 +175,31 @@ will be compiled for the target platform without requiring that the
 Assuming a Rails app with Bundler's standard setup, add something like
 this to your top-level `.gitignore` to only keep the cache:
 
-    vendor/gems/gems/*
-    vendor/gems/specifications/*
-    vendor/gems/environment.rb
+    bin/*
+    vendor/gems/*
+    !vendor/gems/cache/
 
 Make sure that you explicitly `git add vendor/gems/cache` before you commit.
+
+### Gems with compile-time options
+
+Some gems require you to pass compile-time options to the gem install command.
+For instance, to install mysql, you might do:
+
+    gem install mysql -- --with-mysql-config=/usr/local/lib/mysql
+
+You can pass these options to the bundler by creating a YAML file containing
+the options in question:
+
+    mysql:
+      mysql-config: /usr/local/lib/mysql
+
+You can then point the bundler at the file:
+
+    gem bundle --build-options build_options.yml
+
+In general, you will want to keep the build options YAML out of version control,
+and provide the appropriate options for the system in question.
 
 ### Running your application
 
@@ -197,7 +217,7 @@ You can use `gem exec bash` to enter a shell that will run all binaries in
 the current context.
 
 Yet another way is to manually require the environment file first. This is
-located in `[bundle_path]/environments/default.rb`. For example:
+located in `[bundle_path]/gems/environment.rb`. For example:
 
     ruby -r vendor/gems/environment.rb my_ruby_script.rb
 

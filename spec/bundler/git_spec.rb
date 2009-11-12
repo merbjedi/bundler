@@ -76,7 +76,7 @@ describe "Getting gems from git" do
     lib_builder("first", "1.0", :path => tmp_path("gitz", "first"))
     lib_builder("second", "1.0", :path => tmp_path("gitz", "second")) do |s|
       s.add_dependency "first", ">= 0"
-      s.write "lib/second.rb", "require 'first' ; SECOND = 'required'"
+      s.write "lib/second.rb", "require 'first' ; SECOND = '1.0'"
     end
 
     gitify(tmp_path("gitz"))
@@ -92,7 +92,7 @@ describe "Getting gems from git" do
       puts SECOND
     RUBY
 
-    out.should == "required\nrequired"
+    out.should == "1.0\n1.0"
   end
 
   it "allows bundling a specific tag" do
@@ -122,6 +122,104 @@ describe "Getting gems from git" do
       tmp_gem_path.should_not include_cached_gem("very-simple-1.0")
       tmp_gem_path.should_not include_installed_gem("very-simple-1.0")
       tmp_gem_path.should_not include_vendored_dir("very-simple")
+    end
+  end
+
+  describe "using a git block" do
+    it "loads the gems specified in the git block" do
+      lib_builder "omg", "1.0"
+      gitify("#{tmp_path}/dirs/omg")
+
+      install_manifest <<-Gemfile
+        clear_sources
+        git "#{tmp_path}/dirs/omg" do
+          gem "omg"
+        end
+      Gemfile
+
+      :default.should have_const("OMG")
+    end
+
+    it "works when specifying a branch" do
+      lib_builder "omg", "1.0"
+      gitify("#{tmp_path}/dirs/omg")
+
+      install_manifest <<-Gemfile
+        clear_sources
+        git "#{tmp_path}/dirs/omg", :branch => :master do
+          gem "omg"
+        end
+      Gemfile
+
+      :default.should have_const("OMG")
+    end
+
+    it "works when the gems don't have gemspecs" do
+      lib_builder "omg", "1.0", :gemspec => false
+      gitify("#{tmp_path}/dirs/omg")
+
+      install_manifest <<-Gemfile
+        clear_sources
+        git "#{tmp_path}/dirs/omg" do
+          gem "omg", "1.0"
+        end
+      Gemfile
+
+      :default.should have_const("OMG")
+    end
+
+    it "works when the gems are not at the root" do
+      lib_builder "omg", "1.0", :gemspec => false
+      gitify("#{tmp_path}/dirs")
+
+      install_manifest <<-Gemfile
+        clear_sources
+        git "#{tmp_path}/dirs" do
+          gem "omg", "1.0", :path => "omg"
+        end
+      Gemfile
+
+      :default.should have_const("OMG")
+    end
+
+    it "always pulls the dependency from git even if there is a newer gem available" do
+      lib_builder "abstract", "0.5"
+      gitify("#{tmp_path}/dirs/abstract")
+
+      install_manifest <<-Gemfile
+        clear_sources
+        source "file://#{gem_repo1}"
+        gem "abstract", :git => "#{tmp_path}/dirs/abstract"
+      Gemfile
+
+      out = run_in_context <<-RUBY
+        Bundler.require_env
+        puts ABSTRACT
+      RUBY
+
+      out.should == '0.5'
+    end
+
+    it "raises an exception when nesting calls to git" do
+      lambda {
+        install_manifest <<-Gemfile
+          git "foo" do
+            git "bar" do
+              gem "omg"
+            end
+          end
+        Gemfile
+      }.should raise_error(Bundler::DirectorySourceError, /cannot nest calls to directory or git/)
+
+      lambda {
+        install_manifest <<-Gemfile
+          directory "foo" do
+            git "bar" do
+              gem "omg"
+            end
+          end
+        Gemfile
+      }.should raise_error(Bundler::DirectorySourceError, /cannot nest calls to directory or git/)
     end
   end
 end

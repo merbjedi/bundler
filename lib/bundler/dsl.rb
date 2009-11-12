@@ -2,10 +2,16 @@ module Bundler
   class ManifestFileNotFound < StandardError; end
 
   class Dsl
+    def self.evaluate(environment, file)
+      builder = new(environment)
+      builder.instance_eval(File.read(file.to_s), file.to_s, 1)
+    end
+
     def initialize(environment)
       @environment = environment
-      @sources = Hash.new { |h,k| h[k] = {} }
-      @only, @except = nil, nil
+      @directory_sources = []
+      @git_sources = {}
+      @only, @except, @directory, @git = nil, nil, nil, nil
     end
 
     def bundle_path(path)
@@ -35,16 +41,36 @@ module Bundler
       end
     end
 
-    def only(env)
-      old, @only = @only, _combine_onlys(env)
+    def only(*env)
+      old, @only = @only, _combine_only(env)
       yield
       @only = old
     end
 
-    def except(env)
-      old, @except = @except, _combine_excepts(env)
+    def except(*env)
+      old, @except = @except, _combine_except(env)
       yield
       @except = old
+    end
+
+    def directory(path, options = {})
+      raise DirectorySourceError, "cannot nest calls to directory or git" if @directory || @git
+      @directory = DirectorySource.new(options.merge(:location => path))
+      @directory_sources << @directory
+      @environment.add_priority_source(@directory)
+      retval = yield if block_given?
+      @directory = nil
+      retval
+    end
+
+    def git(uri, options = {})
+      raise DirectorySourceError, "cannot nest calls to directory or git" if @directory || @git
+      @git = GitSource.new(options.merge(:uri => uri))
+      @git_sources[uri] = @git
+      @environment.add_priority_source(@git)
+      retval = yield if block_given?
+      @git = nil
+      retval
     end
 
     def clear_sources
@@ -55,37 +81,22 @@ module Bundler
       options = args.last.is_a?(Hash) ? args.pop : {}
       version = args.last
 
-      options[:only] = _combine_onlys(options[:only] || options["only"])
-      options[:except] = _combine_excepts(options[:except] || options["except"])
+      if path = options.delete(:vendored_at)
+        options[:path] = path
+        warn "The :vendored_at option is deprecated. Use :path instead.\nFrom #{caller[0]}"
+      end
+
+      options[:only] = _combine_only(options[:only] || options["only"])
+      options[:except] = _combine_except(options[:except] || options["except"])
 
       dep = Dependency.new(name, options.merge(:version => version))
 
-      # OMG REFACTORZ. KTHX
-      if vendored_at = options[:vendored_at]
-        vendored_at = Pathname.new(vendored_at)
-        vendored_at = @environment.filename.dirname.join(vendored_at) if vendored_at.relative?
-
-        @sources[:directory][vendored_at.to_s] ||= begin
-          source = DirectorySource.new(
-            :name     => name,
-            :version  => version,
-            :location => vendored_at
-          )
-          @environment.add_priority_source(source)
-          true
-        end
-      elsif git = options[:git]
-        @sources[:git][git] ||= begin
-          source = GitSource.new(
-            :name    => name,
-            :version => version,
-            :uri     => git,
-            :ref     => options[:commit] || options[:tag],
-            :branch  => options[:branch]
-          )
-          @environment.add_priority_source(source)
-          true
-        end
+      if options.key?(:bundle) && !options[:bundle]
+        dep.source = SystemGemSource.instance
+      elsif @git || options[:git]
+        dep.source = _handle_git_option(name, version, options)
+      elsif @directory || options[:path]
+        dep.source = _handle_vendored_option(name, version, options)
       end
 
       @environment.dependencies << dep
@@ -93,16 +104,68 @@ module Bundler
 
   private
 
-    def _combine_onlys(only)
+    def _handle_vendored_option(name, version, options)
+      dir, path = _find_directory_source(options[:path])
+
+      if dir
+        dir.required_specs << name
+        dir.add_spec(path, name, version) if version
+        dir
+      else
+        directory options[:path] do
+          _handle_vendored_option(name, version, {})
+        end
+      end
+    end
+
+    def _find_directory_source(path)
+      if @directory
+        return @directory, Pathname.new(path || '')
+      end
+
+      path = @environment.filename.dirname.join(path)
+
+      @directory_sources.each do |s|
+        if s.location.expand_path.to_s < path.expand_path.to_s
+          return s, path.relative_path_from(s.location)
+        end
+      end
+
+      nil
+    end
+
+    def _handle_git_option(name, version, options)
+      git    = options[:git].to_s
+      ref    = options[:commit] || options[:tag]
+      branch = options[:branch]
+
+      if source = @git || @git_sources[git]
+        if ref && source.ref != ref
+          raise GitSourceError, "'#{git}' already specified with ref: #{source.ref}"
+        elsif branch && source.branch != branch
+          raise GitSourceError, "'#{git}' already specified with branch: #{source.branch}"
+        end
+
+        source.required_specs << name
+        source.add_spec(Pathname.new(options[:path] || '.'), name, version) if version
+        source
+      else
+        git(git, :ref => ref, :branch => branch) do
+          _handle_git_option(name, version, options)
+        end
+      end
+    end
+
+    def _combine_only(only)
       return @only unless only
-      only = [only].flatten.compact.uniq.map { |o| o.to_s }
+      only = Array(only).compact.uniq.map { |o| o.to_s }
       only &= @only if @only
       only
     end
 
-    def _combine_excepts(except)
+    def _combine_except(except)
       return @except unless except
-      except = [except].flatten.compact.uniq.map { |o| o.to_s }
+      except = Array(except).compact.uniq.map { |o| o.to_s }
       except |= @except if @except
       except
     end

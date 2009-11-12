@@ -25,33 +25,40 @@ module Bundler
     rescue SourceNotCached => e
       Bundler.logger.error e.message
       exit 9
+    rescue ManifestFileNotFound => e
+      Bundler.logger.error e.message
+      exit 10
     end
 
     def initialize(options)
       @options = options
-      @manifest = Bundler::Environment.load(@options[:manifest])
+      @environment = Bundler::Environment.load(@options[:manifest])
     end
 
     def bundle
-      @manifest.install(@options)
+      @environment.install(@options)
     end
 
     def cache
-      @manifest.cache(@options)
+      @environment.cache(@options)
     end
 
     def prune
-      @manifest.prune(@options)
+      @environment.prune(@options)
     end
 
     def list
-      @manifest.list(@options)
+      @environment.list(@options)
+    end
+
+    def list_outdated
+      @environment.list_outdated(@options)
     end
 
     def exec
-      @manifest.setup_environment
+      @environment.setup_environment
       # w0t?
-      super(*@options[:args])
+      super(*$command)
     end
 
     def run(command)

@@ -36,8 +36,8 @@ module Bundler
     # ==== Returns
     # <GemBundle>,nil:: If the list of dependencies can be resolved, a
     #   collection of gemspecs is returned. Otherwise, nil is returned.
-    def self.resolve(requirements, sources)
-      resolver = new(sources)
+    def self.resolve(requirements, sources, source_requirements = {})
+      resolver = new(sources, source_requirements)
       result = catch(:success) do
         resolver.resolve(requirements, {})
         output = resolver.errors.inject("") do |o, (conflict, (origin, requirement))|
@@ -49,24 +49,44 @@ module Bundler
         raise VersionConflict, "No compatible versions could be found for required dependencies:\n  #{output}"
         nil
       end
-      result && GemBundle.new(result.values)
+      if result
+        # Order gems in order of dependencies. Every gem's dependency is at
+        # a smaller index in the array.
+        ordered = []
+        result.values.each do |spec1|
+          index = nil
+          place = ordered.detect do |spec2|
+            spec1.dependencies.any? { |d| d.name == spec2.name }
+          end
+          place ?
+            ordered.insert(ordered.index(place), spec1) :
+            ordered << spec1
+        end
+        ordered.reverse
+      end
     end
 
-    def initialize(sources)
+    def initialize(sources, source_requirements)
       @errors = {}
       @stack  = []
-      @specs  = Hash.new { |h,k| h[k] = {} }
+      @specs  = Hash.new { |h,k| h[k] = [] }
+      @by_gem = source_requirements
       @cache  = {}
       @index  = {}
 
-      sources.reverse_each do |source|
-        source.gems.values.each do |spec|
-          # TMP HAX FOR OPTZ
-          spec.source = source
-          next unless Gem::Platform.match(spec.platform)
-          @specs[spec.name][spec.version] = spec
+      sources.each do |source|
+        source.gems.each do |name, specs|
+          # Hack to work with a regular Gem::SourceIndex
+          [specs].flatten.compact.each do |spec|
+            next if @specs[spec.name].any? { |s| s.version == spec.version }
+            @specs[spec.name] << spec
+          end
         end
       end
+    end
+
+    def debug
+      puts yield if defined?($debug) && $debug
     end
 
     def resolve(reqs, activated)
@@ -74,27 +94,43 @@ module Bundler
       # gem dependencies have been resolved.
       throw :success, activated if reqs.empty?
 
-      # Sort requirements so that the ones that are easiest to resolve are first.
-      # Easiest to resolve is defined by: Is this gem already activated? Otherwise,
-      # check the number of child dependencies this requirement has.
-      reqs = reqs.sort_by do |req|
-        activated[req.name] ? 0 : search(req).size
+      debug { STDIN.gets ; print "\e[2J\e[f" ; "==== Iterating ====\n\n" }
+
+      # Sort dependencies so that the ones that are easiest to resolve are first.
+      # Easiest to resolve is defined by:
+      #   1) Is this gem already activated?
+      #   2) Do the version requirements include prereleased gems?
+      #   3) Sort by number of gems available in the source.
+      reqs = reqs.sort_by do |a|
+        [ activated[a.name] ? 0 : 1,
+          a.version_requirements.prerelease? ? 0 : 1,
+          @errors[a.name]   ? 0 : 1,
+          activated[a.name] ? 0 : search(a).size ]
       end
+
+      debug { "Activated:\n" + activated.values.map { |a| "  #{a.name} (#{a.version})" }.join("\n") }
+      debug { "Requirements:\n" + reqs.map { |r| "  #{r.name} (#{r.version_requirements})"}.join("\n") }
 
       activated = activated.dup
       # Pull off the first requirement so that we can resolve it
       current   = reqs.shift
 
+      debug { "Attempting:\n  #{current.name} (#{current.version_requirements})"}
+
       # Check if the gem has already been activated, if it has, we will make sure
       # that the currently activated gem satisfies the requirement.
       if existing = activated[current.name]
         if current.version_requirements.satisfied_by?(existing.version)
+          debug { "    * [SUCCESS] Already activated" }
           @errors.delete(existing.name)
           # Since the current requirement is satisfied, we can continue resolving
           # the remaining requirements.
           resolve(reqs, activated)
         else
+          debug { "    * [FAIL] Already activated" }
           @errors[existing.name] = [existing, current]
+          debug { current.required_by.map {|d| "      * #{d.name} (#{d.version_requirements})" }.join("\n") }
+          # debug { "    * All current conflicts:\n" + @errors.keys.map { |c| "      - #{c}" }.join("\n") }
           # Since the current requirement conflicts with an activated gem, we need
           # to backtrack to the current requirement's parent and try another version
           # of it (maybe the current requirement won't be present anymore). If the
@@ -103,6 +139,7 @@ module Bundler
           parent = current.required_by.last || existing.required_by.last
           # We track the spot where the current gem was activated because we need
           # to keep a list of every spot a failure happened.
+          debug { "    -> Jumping to: #{parent.name}" }
           throw parent.name, existing.required_by.last.name
         end
       else
@@ -138,6 +175,7 @@ module Bundler
           # the conflicting gem, hopefully finding a combination that activates correctly.
           @stack.reverse_each do |savepoint|
             if conflicts.include?(savepoint)
+              debug { "    -> Jumping to: #{savepoint}" }
               throw savepoint
             end
           end
@@ -152,11 +190,16 @@ module Bundler
       spec.required_by << requirement
 
       activated[spec.name] = spec
+      debug { "  Activating: #{spec.name} (#{spec.version})" }
+      debug { spec.required_by.map { |d| "    * #{d.name} (#{d.version_requirements})" }.join("\n") }
 
       # Now, we have to loop through all child dependencies and add them to our
       # array of requirements.
+      debug { "    Dependencies"}
       spec.dependencies.each do |dep|
         next if dep.type == :development
+        debug { "    * #{dep.name} (#{dep.version_requirements})" }
+        dep.required_by.replace(requirement.required_by)
         dep.required_by << requirement
         reqs << dep
       end
@@ -178,7 +221,9 @@ module Bundler
 
     def search(dependency)
       @cache[dependency.hash] ||= begin
-        @specs[dependency.name].values.select do |spec|
+        collection = @by_gem[dependency.name].gems if @by_gem[dependency.name]
+        collection ||= @specs
+        collection[dependency.name].select do |spec|
           match = dependency =~ spec
           match &= dependency.version_requirements.prerelease? if spec.version.prerelease?
           match

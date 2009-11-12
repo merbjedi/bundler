@@ -1,6 +1,49 @@
 require File.expand_path(File.dirname(__FILE__) + '/../spec_helper')
 
 describe "Bundler::CLI" do
+  describe "it compiles gems that take options" do
+    before(:each) do
+      build_manifest <<-Gemfile
+        clear_sources
+        source "file://#{gem_repo1}"
+        gem "very-simple-binary"
+      Gemfile
+    end
+
+    it "fails if the option is not provided" do
+      Dir.chdir(bundled_app) do
+        @output = gem_command :bundle, "2>&1"
+      end
+
+      @output.should =~ /Failed to build gem native extension/
+    end
+
+    it "passes if a yaml is specified that contains the necessary options" do
+      File.open(bundled_app.join("build.yml"), "w+") do |file|
+        file.puts <<-build_options.gsub(/^          /, '')
+          very-simple-binary:
+            simple: wot
+        build_options
+      end
+
+      Dir.chdir(bundled_app) do
+        @output = gem_command :bundle, "--build-options=build.yml 2>&1"
+      end
+
+      @output.should_not =~ /Failed to build gem native extension/
+
+      ruby_code = <<-RUBY.split("\n").join("; ")
+        require %{very_simple_binary}
+        include VerySimpleBinaryForTests
+        puts working
+      RUBY
+
+      @output = run_in_context "exec %{#{Gem.ruby} -e '#{ruby_code}'}"
+
+      @output.should == "true"
+    end
+  end
+
   describe "it working" do
     before(:each) do
       build_manifest <<-Gemfile
@@ -50,6 +93,13 @@ describe "Bundler::CLI" do
       Dir.chdir(bundled_app) do
         out = gem_command :exec, %[ruby -e 'require "extlib" ; puts Extlib']
         out.should == "Extlib"
+      end
+    end
+
+    it "runs exec with options correctly" do
+      Dir.chdir(bundled_app) do
+        out = gem_command :exec, %[ruby -e 'puts "hello"'], :no_quote => true
+        out.should == "hello"
       end
     end
 
@@ -123,6 +173,11 @@ describe "Bundler::CLI" do
       out = gem_command :bundle
       out.should include("Could not find gem 'polyglot (>= 0.2.5, runtime)' (required by 'treetop (>= 0, runtime)') in any of the sources")
     end
+  end
+
+  it "raises when providing a bad manifest" do
+    out = gem_command :bundle, "-m manifest_not_here"
+    out.should =~ /Manifest file not found: \".*manifest_not_here\"/
   end
 
   describe "it working while specifying the manifest file name" do
@@ -299,6 +354,58 @@ describe "Bundler::CLI" do
     end
   end
 
+  describe "bundling only given environments" do
+    before(:each) do
+      build_manifest <<-Gemfile
+        clear_sources
+        source "file://#{gem_repo1}"
+        gem "extlib"
+        gem "very-simple", :only => :server
+        gem "rack", :only => :test
+      Gemfile
+
+      %w(doc environment.rb gems specifications).each do |f|
+        FileUtils.rm_rf(tmp_gem_path.join(f))
+      end
+    end
+
+    it "install gems for environments specified in --only line" do
+      Dir.chdir(bundled_app) do
+        gem_command :bundle, "--only test"
+        bundled_app('vendor', 'gems', 'environment.rb').should have_load_paths(bundled_app("vendor", "gems"),
+          "extlib-0.9.12" => %w(lib),
+          "rack-0.9.1" => %w(bin lib)
+        )
+      end
+    end
+  end
+
+  describe "bundling all but certain environments" do
+    before(:each) do
+      build_manifest <<-Gemfile
+        clear_sources
+        source "file://#{gem_repo1}"
+        gem "extlib"
+        gem "very-simple", :except => :test
+        gem "rack", :except => :server
+      Gemfile
+
+      %w(doc environment.rb gems specifications).each do |f|
+        FileUtils.rm_rf(tmp_gem_path.join(f))
+      end
+    end
+
+    it "install gems for environments specified in --only line" do
+      Dir.chdir(bundled_app) do
+        gem_command :bundle, "--only test"
+        bundled_app('vendor', 'gems', 'environment.rb').should have_load_paths(bundled_app("vendor", "gems"),
+          "extlib-0.9.12" => %w(lib),
+          "rack-0.9.1" => %w(bin lib)
+        )
+      end
+    end
+  end
+
   describe "caching gems to the bundle" do
     before(:each) do
       build_manifest <<-Gemfile
@@ -375,6 +482,47 @@ describe "Bundler::CLI" do
         out = gem_command :bundle, "--cache foo/bar"
         out.should == "'foo/bar' contains no gemfiles"
       end
+    end
+  end
+
+  describe "listing outdated gems" do
+    it "shows a message when there are no outdated gems" do
+      m = build_manifest <<-Gemfile
+        clear_sources
+      Gemfile
+      m.install
+
+      Dir.chdir(bundled_app) do
+        @output = gem_command :bundle, "--list-outdated"
+      end
+
+      @output.should =~ /All gems are up to date/
+    end
+
+    it "shows all the outdated gems" do
+      m = build_manifest <<-Gemfile
+        clear_sources
+        source "file://#{gem_repo1}"
+        source "file://#{gem_repo2}"
+        gem "rack", "0.9.1"
+        gem "rails"
+      Gemfile
+      m.install
+
+      Dir.chdir(bundled_app) do
+        @output = gem_command :bundle, "--list-outdated"
+      end
+
+      [ "Outdated gems:",
+        " * actionmailer",
+        " * actionpack",
+        " * activerecord",
+        " * activeresource",
+        " * activesupport",
+        " * rack",
+        " * rails"].each do |message|
+          @output.should =~ /^#{Regexp.escape(message)}$/
+        end
     end
   end
 end

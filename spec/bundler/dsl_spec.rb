@@ -2,14 +2,6 @@ require File.expand_path(File.dirname(__FILE__) + '/../spec_helper')
 
 describe "Bundler DSL" do
 
-  def have_const(const)
-    simple_matcher do |given, matcher|
-      matcher.failure_message = "Could not find constant '#{const}' in environment: '#{given}'"
-      out = run_in_context "Bundler.require_env #{given.inspect} ; p !!defined?(#{const})"
-      out == "true"
-    end
-  end
-
   it "supports only blocks" do
     install_manifest <<-Gemfile
       clear_sources
@@ -20,17 +12,31 @@ describe "Bundler DSL" do
 
       only :test do
         gem "rspec", :require_as => "spec"
-        gem "webrat"
+        gem "very-simple"
       end
     Gemfile
 
     "default".should have_const("ActiveRecord")
     "default".should_not have_const("Spec")
-    "default".should_not have_const("Webrat")
+    "default".should_not have_const("VerySimpleForTests")
 
     "test".should have_const("ActiveRecord")
     "test".should have_const("Spec")
-    "test".should have_const("Webrat")
+    "test".should have_const("VerySimpleForTests")
+  end
+
+  it "supports only blocks with multiple args" do
+    install_manifest <<-Gemfile
+      clear_sources
+      source "file://#{gem_repo1}"
+      only :test, :production do
+        gem "rack"
+      end
+    Gemfile
+
+    "default".should_not have_const("Rack")
+    "test".should have_const("Rack")
+    "production".should have_const("Rack")
   end
 
   it "supports nesting only blocks" do
@@ -40,16 +46,16 @@ describe "Bundler DSL" do
       source "file://#{gem_repo2}"
 
       only [:test, :staging] do
-        gem "webrat"
+        gem "very-simple"
         only :test do
           gem "rspec", :require_as => "spec"
         end
       end
     Gemfile
 
-    "test".should have_const("Webrat")
+    "test".should have_const("VerySimpleForTests")
     "test".should have_const("Spec")
-    "staging".should have_const("Webrat")
+    "staging".should have_const("VerySimpleForTests")
     "staging".should_not have_const("Spec")
   end
 
@@ -63,17 +69,31 @@ describe "Bundler DSL" do
 
       except :test do
         gem "rspec", :require_as => "spec"
-        gem "webrat"
+        gem "very-simple"
       end
     Gemfile
 
     "default".should have_const("ActiveRecord")
     "default".should have_const("Spec")
-    "default".should have_const("Webrat")
+    "default".should have_const("VerySimpleForTests")
 
     "test".should have_const("ActiveRecord")
     "test".should_not have_const("Spec")
-    "test".should_not have_const("Webrat")
+    "test".should_not have_const("VerySimpleForTests")
+  end
+
+  it "supports except blocks with multiple args" do
+    install_manifest <<-Gemfile
+      clear_sources
+      source "file://#{gem_repo1}"
+      except :test, :production do
+        gem "rack"
+      end
+    Gemfile
+
+    "default".should have_const("Rack")
+    "test".should_not have_const("Rack")
+    "production".should_not have_const("Rack")
   end
 
   it "supports nesting except blocks" do
@@ -83,7 +103,7 @@ describe "Bundler DSL" do
       source "file://#{gem_repo2}"
 
       except [:test] do
-        gem "webrat"
+        gem "very-simple"
         except :omg do
           gem "rspec", :require_as => "spec"
         end
@@ -91,10 +111,10 @@ describe "Bundler DSL" do
     Gemfile
 
     "default".should have_const("Spec")
-    "default".should have_const("Webrat")
-    "test".should_not have_const("Webrat")
+    "default".should have_const("VerySimpleForTests")
+    "test".should_not have_const("VerySimpleForTests")
     "test".should_not have_const("Spec")
-    "omg".should have_const("Webrat")
+    "omg".should have_const("VerySimpleForTests")
     "omg".should_not have_const("Spec")
   end
 end

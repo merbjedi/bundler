@@ -10,11 +10,11 @@ module Bundler
     attr_accessor :rubygems, :system_gems
     attr_writer :gem_path, :bindir
 
-    def self.load(gemfile = nil)
-      gemfile = gemfile ? Pathname.new(gemfile).expand_path : default_manifest_file
+    def self.load(file = nil)
+      gemfile = Pathname.new(file || default_manifest_file).expand_path
 
       unless gemfile.file?
-        raise ManifestFileNotFound, "#{filename.inspect} does not exist"
+        raise ManifestFileNotFound, "Manifest file not found: #{gemfile.to_s.inspect}"
       end
 
       new(gemfile)
@@ -32,9 +32,9 @@ module Bundler
       raise DefaultManifestNotFound
     end
 
-    def initialize(filename) #, sources, dependencies, bindir, path, rubygems, system_gems)
+    def initialize(filename)
       @filename         = filename
-      @default_sources  = [GemSource.new(:uri => "http://gems.rubyforge.org"), SystemGemSource.new({})]
+      @default_sources  = default_sources
       @sources          = []
       @priority_sources = []
       @dependencies     = []
@@ -42,20 +42,29 @@ module Bundler
       @system_gems      = true
 
       # Evaluate the Gemfile
-      builder = Dsl.new(self)
-      builder.instance_eval(File.read(filename))
+      Dsl.evaluate(self, filename)
     end
 
     def install(options = {})
+      if only_envs = options[:only]
+        dependencies.reject! { |d| !only_envs.any? {|env| d.in?(env) } }
+      end
+
+      no_bundle = dependencies.map do |dep|
+        dep.source == SystemGemSource.instance && dep.name
+      end.compact
+
       update = options[:update]
       cached = options[:cached]
 
-      repository.install(gem_dependencies, sources,
-        :rubygems    => rubygems,
-        :system_gems => system_gems,
-        :manifest    => filename,
-        :update      => update,
-        :cached      => cached
+      repository.install(dependencies, sources,
+        :rubygems      => rubygems,
+        :system_gems   => system_gems,
+        :manifest      => filename,
+        :update        => options[:update],
+        :cached        => options[:cached],
+        :build_options => options[:build_options],
+        :no_bundle     => no_bundle
       )
       Bundler.logger.info "Done."
     end
@@ -98,6 +107,18 @@ module Bundler
       Bundler.logger.info "Currently bundled gems:"
       repository.gems.each do |spec|
         Bundler.logger.info " * #{spec.name} (#{spec.version})"
+      end
+    end
+
+    def list_outdated(options={})
+      outdated_gems = repository.outdated_gems
+      if outdated_gems.empty?
+        Bundler.logger.info "All gems are up to date."
+      else
+        Bundler.logger.info "Outdated gems:"
+        outdated_gems.each do |name|
+          Bundler.logger.info " * #{name}"
+        end
       end
     end
 
@@ -144,6 +165,10 @@ module Bundler
     end
 
   private
+
+    def default_sources
+      [GemSource.new(:uri => "http://gems.rubyforge.org"), SystemGemSource.instance]
+    end
 
     def repository
       @repository ||= Repository.new(gem_path, bindir)

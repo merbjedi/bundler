@@ -12,21 +12,21 @@ module Spec
       %x{#{Gem.ruby} -I#{lib} #{opts} -e "#{ruby}"}.strip
     end
 
-    def gem_command(command, args = "")
-      if command == :exec
+    def gem_command(command, args = "", options = {})
+      if command == :exec && !options[:no_quote]
         args = args.gsub(/(?=")/, "\\")
         args = %["#{args}"]
       end
       lib  = File.join(File.dirname(__FILE__), '..', '..', 'lib')
-      %x{#{Gem.ruby} -I#{lib} -rubygems -S gem #{command} #{args}}.strip
+      %x{#{Gem.ruby} -I#{lib} -rubygems -S gem --backtrace #{command} #{args}}.strip
     end
 
     def build_manifest_file(*args)
       path = bundled_app("Gemfile")
       path = args.shift if args.first.is_a?(Pathname)
       str  = args.shift || ""
-      FileUtils.mkdir_p(path.dirname)
-      File.open(path, 'w') do |f|
+      FileUtils.mkdir_p(path.dirname.to_s)
+      File.open(path.to_s, 'w') do |f|
         f.puts str
       end
     end
@@ -63,7 +63,7 @@ module Spec
         `git init`
         `git add *`
         `git commit -m "OMG GITZ"`
-        `git checkout -b alt`
+        `git checkout --quiet -b alt`
         path.join("lib", name).mkdir_p
         File.open(path.join("lib", name, "in_a_branch.rb"), 'w') do |file|
           file.puts "OMG_IN_A_BRANCH = 'tagged'"
@@ -76,7 +76,7 @@ module Spec
         end
         `git add *`
         `git commit -m "OMG BRANCHING"`
-        `git checkout master`
+        `git checkout --quiet master`
       end
       path
     end
@@ -88,12 +88,13 @@ module Spec
     end
 
     class LibBuilder
-      def initialize(name, version)
+      def initialize(name, version, options)
         @spec = Gem::Specification.new do |s|
           s.name = name
           s.version = version
         end
-        @files = { "lib/#{name}.rb" => "#{name.upcase} = 'required'" }
+        @options = options
+        @files = { "lib/#{name}.rb" => "#{name.upcase} = '#{version}'" }
       end
 
       def method_missing(*args, &blk)
@@ -106,7 +107,8 @@ module Spec
 
       def _build(path)
         path ||= tmp_path('dirs', name)
-        @files["#{name}.gemspec"] = @spec.to_ruby
+        path = Pathname.new(path)
+        @files["#{name}.gemspec"] = @spec.to_ruby if @options[:gemspec]
         @files.each do |file, source|
           file = path.join(file)
           file.dirname.mkdir_p
@@ -117,9 +119,32 @@ module Spec
     end
 
     def lib_builder(name, version, options = {})
-      spec = LibBuilder.new(name, version)
+      options[:gemspec] = true unless options.key?(:gemspec)
+
+      spec = LibBuilder.new(name, version, options)
       yield spec if block_given?
       spec._build(options[:path] || tmp_path('dirs', name))
+    end
+
+    def install_gems(*gems)
+      Dir["#{fixture_dir}/*/gems/*.gem"].each do |path|
+        if gems.include?(File.basename(path, ".gem"))
+          `gem install --no-rdoc --no-ri --ignore-dependencies #{path}`
+        end
+      end
+    end
+
+    alias install_gem install_gems
+
+    def system_gems(*gems)
+      system_gem_path.mkdir_p
+
+      gem_home, gem_path = ENV['GEM_HOME'], ENV['GEM_PATH']
+      ENV['GEM_HOME'], ENV['GEM_PATH'] = system_gem_path.to_s, system_gem_path.to_s
+
+      install_gems(*gems)
+      yield
+      ENV['GEM_HOME'], ENV['GEM_PATH'] = gem_home, gem_path
     end
 
     def reset!

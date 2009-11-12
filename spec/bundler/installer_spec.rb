@@ -85,8 +85,10 @@ describe "Installing gems" do
 
     it "keeps bin files for already installed gems" do
       setup
+      bundled_app("bin", "rails").should_not exist
       @manifest.install
-      lambda { @manifest.install }.should_not change { bundled_app("bin", "rails").mtime }
+      @manifest.install
+      bundled_app("bin", "rails").should exist
     end
 
     it "does not remove bin files when updating gems" do
@@ -127,11 +129,11 @@ describe "Installing gems" do
       m = build_manifest <<-Gemfile
         clear_sources
         source "file://#{gem_repo1}"
-        gem "webrat", "0.4.4.racktest"
+        gem "very-simple-prerelease", "1.0.pre"
       Gemfile
       m.install
-      bundled_app("vendor", "gems").should have_cached_gem("webrat-0.4.4.racktest", "nokogiri-1.3.2")
-      bundled_app("vendor", "gems").should have_installed_gem("webrat-0.4.4.racktest", "nokogiri-1.3.2")
+      bundled_app("vendor", "gems").should have_cached_gem("very-simple-prerelease-1.0.pre")
+      bundled_app("vendor", "gems").should have_installed_gem("very-simple-prerelease-1.0.pre")
     end
 
     it "outputs a logger message for each gem that is installed" do

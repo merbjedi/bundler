@@ -3,6 +3,7 @@ module Bundler
 
   class Dependency
     attr_reader :name, :version, :require_as, :only, :except
+    attr_accessor :source
 
     def initialize(name, options = {}, &block)
       options.each do |k, v|
@@ -14,6 +15,7 @@ module Bundler
       @require_as = Array(options.include?("require_as") ? options["require_as"] : name).compact
       @only       = options["only"]
       @except     = options["except"]
+      @source     = options["source"]
       @block      = block
 
       if (@only && @only.include?("rubygems")) || (@except && @except.include?("rubygems"))
@@ -36,8 +38,14 @@ module Bundler
     def require_env(environment)
       return unless in?(environment)
 
-      @require_as.each do |file|
-        require file
+      if @require_as
+        Array(@require_as).each { |file| require file }
+      else
+        begin
+          require name
+        rescue LoadError
+          # Do nothing
+        end
       end
 
       @block.call if @block
